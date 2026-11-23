@@ -1,0 +1,32 @@
+name: Ideia de projeto (pitch)
+description: Proposta de novo projeto para a Área Técnica
+labels: ["pitch"]
+body:
+  - type: textarea
+    id: problema
+    attributes:
+      label: Problema (quem sofre e por quê)
+    validations:
+      required: true
+  - type: textarea
+    id: solucao
+    attributes:
+      label: Solução em uma frase
+    validations:
+      required: true
+  - type: textarea
+    id: escopo
+    attributes:
+      label: Escopo mínimo (o primeiro protótipo que prova a ideia)
+  - type: textarea
+    id: recursos
+    attributes:
+      label: Recursos e riscos
+  - type: input
+    id: equipe
+    attributes:
+      label: Equipe e responsável
+  - type: input
+    id: prazo
+    attributes:
+      label: Prazo e marcos

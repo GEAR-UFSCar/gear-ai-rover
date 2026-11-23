@@ -1,0 +1,37 @@
+name: Demanda externa (ficha)
+description: Registro de pedido de ajuda de pessoa ou instituição de fora do GEAR
+labels: ["demanda-externa"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Não coloque nome, dados de saúde ou contato do demandante aqui.** Use apenas o código da demanda
+        (ex.: Demanda 01). Os dados pessoais ficam na ficha reservada, de acesso restrito.
+  - type: input
+    id: codigo
+    attributes:
+      label: Código da demanda
+    validations:
+      required: true
+  - type: textarea
+    id: problema
+    attributes:
+      label: Descrição do problema (sem dados pessoais)
+    validations:
+      required: true
+  - type: textarea
+    id: requisitos
+    attributes:
+      label: Requisitos e restrições
+  - type: dropdown
+    id: decisao
+    attributes:
+      label: Decisão
+      options:
+        - Em análise
+        - Aceita
+        - Recusada
+  - type: textarea
+    id: combinados
+    attributes:
+      label: Combinados (escopo, prazos, limites de responsabilidade)

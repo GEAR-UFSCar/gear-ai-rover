@@ -1,0 +1,21 @@
+name: Tarefa
+description: Uma tarefa pequena (até uma semana de trabalho)
+labels: ["tarefa"]
+body:
+  - type: input
+    id: titulo
+    attributes:
+      label: Título (comece com um verbo)
+    validations:
+      required: true
+  - type: textarea
+    id: pronto
+    attributes:
+      label: Critério de pronto
+      description: Funciona, foi testado, está documentado, foi revisado.
+    validations:
+      required: true
+  - type: input
+    id: prazo
+    attributes:
+      label: Prazo (opcional)

@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Modelos e estado gerado em execução (baixe com `make modelo`; pesos treinados vão nas Releases)
+*.pt
+*.onnx
+src/rover_map.json
+
+# Arduino
+build/
+
+# Segredos e dados pessoais (nunca versionar)
+.env
+*.pem
+secrets/
+
+# Editor
+.vscode/
+.idea/

@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pytest ruff
+      - name: Lint (informativo)
+        run: ruff check . || true
+      - name: Testes
+        run: pytest -q
+
+  firmware:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: arduino/setup-arduino-cli@v2
+      - name: Compilar firmware do Arduino UNO
+        working-directory: firmware/arduino-uno/SmartRobotCar_Main_V1
+        run: |
+          arduino-cli core update-index
+          arduino-cli compile --profile uno
