@@ -43,9 +43,12 @@ void MotorDriverSystem::initialize() {
     // Initialize voltage sensor
     pinMode(MotorPin::VOLTAGE_SENSOR, INPUT);
     
-    // Initialize servo
+    // Initialize servo (Fase 1: smooth non-blocking ramp)
     m_servo.attach(MotorPin::SERVO);
-    m_servo.write(90); // Initialize to middle position
+    m_servoCurrent = 90;
+    m_servoGoal = 90;
+    m_servoLastStepMs = millis();
+    m_servo.write(m_servoCurrent); // Initialize to middle position
     
     // Initialize sensor data
     m_sensorData.ultrasonic.distanceCm = 0;
@@ -89,11 +92,6 @@ void MotorDriverSystem::updateSensors() {
  * @brief Movement Control (High Level Interface)
  */
 void MotorDriverSystem::move(MovementType type, uint8_t speed) {
-    // Se o comando for ir para frente, mas o sensor detectar obstáculo a <= 20cm
-    if (type == MovementType::Forward && m_sensorData.ultrasonic.hasObstacle) {
-        stop();
-        return; // Ignora o comando de movimento e aborta
-    }
     switch (type) {
         case MovementType::Stop:
             stop();
@@ -202,13 +200,45 @@ void MotorDriverSystem::setRightMotor(uint8_t speed, bool forward) {
 // ========== Servo Control Implementation ==========
 
 /**
- * @brief Set Servo Angle
+ * @brief Set the servo GOAL angle (non-blocking).
+ *
+ * [Fase 1] Only stores the target. The actual movement is performed one small
+ * step at a time by updateServo(). No write(), no delay() here -> the motors
+ * are never blocked while the camera pans.
  */
 void MotorDriverSystem::setServoAngle(uint8_t angle) {
-    // Limit angle range
-    if (angle > 180) angle = 180;
-    m_servo.write(angle);
-    delay(500); // Give servo time to reach position
+    // angle is uint8_t, so it is always >= SERVO_MIN_DEG (0); only clamp the top.
+    if (angle > MotorConfig::SERVO_MAX_DEG) angle = MotorConfig::SERVO_MAX_DEG;
+    m_servoGoal = angle;
+}
+
+/**
+ * @brief Advance the servo one step towards its goal (non-blocking).
+ *
+ * [Fase 1] Called every loop from RobotController::update(). Returns
+ * immediately when already at the goal, so the servo stays perfectly still
+ * when there is nothing to do.
+ */
+void MotorDriverSystem::updateServo() {
+    if (m_servoCurrent == m_servoGoal) {
+        return;
+    }
+
+    uint32_t now = millis();
+    if ((now - m_servoLastStepMs) < MotorConfig::SERVO_STEP_INTERVAL_MS) {
+        return;
+    }
+    m_servoLastStepMs = now;
+
+    if (m_servoCurrent < m_servoGoal) {
+        uint8_t next = m_servoCurrent + MotorConfig::SERVO_STEP_DEG;
+        m_servoCurrent = (next > m_servoGoal) ? m_servoGoal : next;
+    } else {
+        uint8_t next = m_servoCurrent - MotorConfig::SERVO_STEP_DEG;
+        m_servoCurrent = (next < m_servoGoal) ? m_servoGoal : next;
+    }
+
+    m_servo.write(m_servoCurrent);
 }
 
 /**
@@ -224,72 +254,26 @@ void MotorDriverSystem::centerServo() {
  * @brief Read Ultrasonic Distance
  */
 uint16_t MotorDriverSystem::readUltrasonicDistance() {
-
-    // Timeout based on configured maximum distance
-    unsigned long timeout =
-        MotorConfig::MAX_DISTANCE * 58UL + 2000UL;
-
-S
-    // --------------------------------------------------------
-    // Trigger pulse
-    // --------------------------------------------------------
-
-    digitalWrite(
-        MotorPin::ULTRASONIC_TRIG,
-        LOW
-    );
-
+    unsigned long timeout = MotorConfig::MAX_DISTANCE * 58 + 2000;
+    
+    // Trigger ultrasonic
+    digitalWrite(MotorPin::ULTRASONIC_TRIG, LOW);
     delayMicroseconds(2);
-
-    digitalWrite(
-        MotorPin::ULTRASONIC_TRIG,
-        HIGH
-    );
-
+    digitalWrite(MotorPin::ULTRASONIC_TRIG, HIGH);
     delayMicroseconds(10);
-
-    digitalWrite(
-        MotorPin::ULTRASONIC_TRIG,
-        LOW
-    );
-
-
-    // --------------------------------------------------------
-    // Read echo
-    // --------------------------------------------------------
-
-    unsigned long duration = pulseIn(
-        MotorPin::ULTRASONIC_ECHO,
-        HIGH,
-        timeout
-    );
-
-
-    // --------------------------------------------------------
-    // No echo
-    // --------------------------------------------------------
-
-    if (duration == 0) {
-        return 0;
-    }
-
-
-    // --------------------------------------------------------
-    // Convert microseconds -> centimeters
-    // --------------------------------------------------------
-
+    digitalWrite(MotorPin::ULTRASONIC_TRIG, LOW);
+    
+    // Read echo time and convert to distance
+    unsigned long duration = pulseIn(MotorPin::ULTRASONIC_ECHO, HIGH, timeout);
     uint16_t distance = duration / 58;
-
-
-    // --------------------------------------------------------
-    // Limit distance
-    // --------------------------------------------------------
-
+    
+    // Limit max distance
     if (distance > 150) {
         distance = 150;
     }
-
-
+    
+    delay(60);
+    
     return distance;
 }
 

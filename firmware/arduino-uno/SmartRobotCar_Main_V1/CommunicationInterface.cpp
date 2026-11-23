@@ -16,7 +16,11 @@ IRrecv irrecv(IRConfig::PIN_IR);
 decode_results ir_results;
 
 // Key Interrupt Handler
-// Note: This is a global variable, modified in interrupt
+// [Fase 1 - R3] NO LONGER USED. The button is now handled by a debounced
+// long-press poll in processKeyPress() (attachInterrupt was removed from
+// initialize()). Kept only so readKeyValue() still links; do not re-enable
+// without adding proper debounce - a single spurious edge used to switch the
+// rover into an autonomous mode.
 volatile uint8_t g_keyInterruptCounter = 0;
 volatile uint32_t g_keyLastInterruptTime = 0;
 
@@ -66,14 +70,21 @@ void CommunicationInterface::initialize() {
     // Initialize Servo Angle (Default 90 degrees)
     m_servoAngle = 90;
     
-    // Initialize Key (Using Interrupt)
+    // Initialize Key (Fase 1 - R3: debounced long-press polling, no interrupt)
+    // The old edge-counting interrupt fired on a single falling edge, so a bump
+    // or EMI while picking up the rover could silently switch it into an
+    // autonomous mode. We now poll the pin with debounce + hold time instead.
     pinMode(KeyConfig::PIN_KEY, INPUT_PULLUP);  // Use internal pull-up
-    attachInterrupt(digitalPinToInterrupt(KeyConfig::PIN_KEY), keyInterruptHandler, FALLING);  // Trigger on falling edge
     m_lastKeyValue = 0;
-    g_keyInterruptCounter = 0;
-    g_keyLastInterruptTime = 0;
-    
-    Serial.println(F("Key interrupt attached to pin 2"));
+    m_lastCommandMs = millis();
+    m_keyRawLow = false;
+    m_keyStableLow = false;
+    m_keyEdgeMs = millis();
+    m_keyPressStart = 0;
+    m_keyPressLatched = false;
+    m_keyModeIndex = 0;  // start in Standby
+
+    Serial.println(F("Key: debounced long-press mode (hold ~1s to change mode)"));
 }
 
 // ========== Serial Communication Processing ==========
@@ -129,7 +140,11 @@ void CommunicationInterface::parseJSONCommand(const char* jsonString, RobotContr
     int cmdId = doc["N"];
     const char* cmdHandle = doc["H"] | "";
     robot->setCommandId(cmdHandle);
-    
+
+    // [Fase 1 - R4] Refresh the manual-control safety watchdog on every valid
+    // command from the computer (movement, servo, ultrasonic query, ...).
+    m_lastCommandMs = millis();
+
     // Execute Command
     executeCommand(cmdId, robot);
 }
@@ -181,17 +196,6 @@ void CommunicationInterface::executeCommand(int cmdId, RobotController* robot) {
             robot->setMode(OperationMode::ManualControl);
             robot->getModeManager()->executeManualControl(direction, speed);
             }
-        }
-        break;
-
-        case 21: // Ultrasonic Distance Query — Forced Read
-        {
-            // Força uma leitura nova (bloqueante, ~60-80ms)
-            uint16_t distance = robot->getMotorSystem()->readUltrasonicDistance();
-
-            Serial.print(F("{ultrasonic:"));
-            Serial.print(distance);
-            Serial.println(F("}"));
         }
         break;
         
@@ -267,6 +271,17 @@ void CommunicationInterface::executeCommand(int cmdId, RobotController* robot) {
         }
         break;
         
+        case 21: // Ultrasonic Distance Query — Forced Read
+        {
+            // Força uma leitura nova (bloqueante, ~60-80ms)
+            uint16_t distance = robot->getMotorSystem()->readUltrasonicDistance();
+
+            Serial.print(F("{ultrasonic:"));
+            Serial.print(distance);
+            Serial.println(F("}"));
+        }
+        break;
+
         // TODO: Add implementation for other commands
         // Command 1: Motor Control
         // Command 2: Car Move (Time Limited)
@@ -274,11 +289,10 @@ void CommunicationInterface::executeCommand(int cmdId, RobotController* robot) {
         // Command 4: Motor Speed Control
         // Command 7: LED Control (Time Limited)
         // Command 8: LED Control (Unlimited Time)
-        // Command 21: Ultrasonic Query
         // Command 22: Line Sensor Query
         // Command 23: Ground Detection
         // Etc...
-        
+
         default:
             Serial.print(F("{error:unknown_cmd}"));
             break;
@@ -375,12 +389,15 @@ bool CommunicationInterface::getIRButton(uint8_t* buttonNum) {
 void CommunicationInterface::processIRRemote(RobotController* robot) {
     if (!robot) return;
     
-    uint8_t IRrecv_button;
-    
+    uint8_t IRrecv_button = 0;
+
     if (getIRButton(&IRrecv_button)) {
         m_IRrecv_enabled = true;
+        // [Fase 1 - R4] An IR button is also a live command: keep the manual
+        // watchdog fed so IR direction control is not cut short by it.
+        m_lastCommandMs = millis();
     }
-    
+
     if (m_IRrecv_enabled) {
         // Process Button
         switch (IRrecv_button) {
@@ -529,39 +546,82 @@ void CommunicationInterface::checkDirectionKeyTimeout(RobotController* robot) {
  */
 void CommunicationInterface::processKeyPress(RobotController* robot) {
     if (!robot) return;
-    
-    // Use interrupt counter as key value
-    uint8_t keyValue = g_keyInterruptCounter;
-    
-    if (keyValue != m_lastKeyValue && keyValue > 0) {
-        m_lastKeyValue = keyValue;
-        
-        Serial.print(F("Key mode switch: "));
-        Serial.println(keyValue);
-        
-        switch (keyValue) {
-            case 1: // Key 1 - Line Following Mode
-                robot->setMode(OperationMode::LineFollowing);
-                Serial.println(F("Mode: Line Following"));
-                break;
-            case 2: // Key 2 - Obstacle Avoidance Mode
-                robot->setMode(OperationMode::ObstacleAvoidance);
-                Serial.println(F("Mode: Obstacle Avoidance"));
-                break;
-            case 3: // Key 3 - Target Following Mode
-                robot->setMode(OperationMode::TargetFollowing);
-                Serial.println(F("Mode: Target Following"));
-                break;
-            case 4: // Key 4 - Standby Mode
-                robot->setMode(OperationMode::Standby);
-                Serial.println(F("Mode: Standby"));
-                // Reset counter
-                g_keyInterruptCounter = 0;
-                m_lastKeyValue = 0;
-                break;
-            default:
-                break;
+
+    const uint32_t now = millis();
+
+    // [Fase 1 - R3] Ignore the button entirely during power-on settling. Keep
+    // the debounced state synced to the pin so a button that is held through
+    // boot still needs a fresh HOLD_MS after boot before it can arm.
+    if (now < KeyConfig::BOOT_IGNORE_MS) {
+        m_keyRawLow = (digitalRead(KeyConfig::PIN_KEY) == LOW);
+        m_keyStableLow = m_keyRawLow;
+        m_keyEdgeMs = now;
+        m_keyPressStart = m_keyRawLow ? now : 0;
+        m_keyPressLatched = false;
+        return;
+    }
+
+    // Raw read (active LOW because of INPUT_PULLUP)
+    bool rawLow = (digitalRead(KeyConfig::PIN_KEY) == LOW);
+    if (rawLow != m_keyRawLow) {
+        m_keyRawLow = rawLow;
+        m_keyEdgeMs = now;   // contact changed -> restart debounce timer
+    }
+
+    // Accept the new level only after it has been stable for DEBOUNCE_MS
+    if ((now - m_keyEdgeMs) >= KeyConfig::DEBOUNCE_MS && m_keyStableLow != m_keyRawLow) {
+        m_keyStableLow = m_keyRawLow;
+        if (m_keyStableLow) {
+            // Debounced press has started
+            m_keyPressStart = now;
+            m_keyPressLatched = false;
+        } else {
+            // Debounced release: only act if the press was held long enough
+            if (m_keyPressLatched) {
+                m_keyPressLatched = false;
+                advanceKeyMode(robot);
+            }
         }
+    }
+
+    // Arm the mode change once a real press has been held for HOLD_MS.
+    // m_keyPressStart == 0 means we never saw a clean press start -> do not arm.
+    if (m_keyStableLow && !m_keyPressLatched && m_keyPressStart != 0 &&
+        (now - m_keyPressStart) >= KeyConfig::HOLD_MS) {
+        m_keyPressLatched = true;
+        Serial.println(F("Key: long-press armed (release to change mode)"));
+    }
+}
+
+/**
+ * @brief Cycle to the next mode after a confirmed long-press (R3).
+ *
+ * Order: Standby -> Line Following -> Obstacle Avoidance -> Target Following ->
+ * back to Standby. The rover only ever leaves Standby through a deliberate
+ * ~1 second hold, never through a tap or electrical noise.
+ */
+void CommunicationInterface::advanceKeyMode(RobotController* robot) {
+    m_keyModeIndex = (m_keyModeIndex + 1) % KeyConfig::MODE_COUNT;
+
+    switch (m_keyModeIndex) {
+        case 1:
+            robot->setMode(OperationMode::LineFollowing);
+            Serial.println(F("Key -> Mode: Line Following"));
+            break;
+        case 2:
+            robot->setMode(OperationMode::ObstacleAvoidance);
+            Serial.println(F("Key -> Mode: Obstacle Avoidance"));
+            break;
+        case 3:
+            robot->setMode(OperationMode::TargetFollowing);
+            Serial.println(F("Key -> Mode: Target Following"));
+            break;
+        case 0:
+        default:
+            robot->setMode(OperationMode::Standby);
+            robot->getMotorSystem()->stop();
+            Serial.println(F("Key -> Mode: Standby"));
+            break;
     }
 }
 

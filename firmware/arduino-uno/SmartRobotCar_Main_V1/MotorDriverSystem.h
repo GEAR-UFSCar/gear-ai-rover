@@ -81,10 +81,18 @@ namespace MotorConfig {
     // Voltage Related
     constexpr float LOW_BATTERY_VOLTAGE = 7.0f; // Low battery threshold
     constexpr float VOLTAGE_RATIO = 3.0f;       // Voltage divider ratio
-    
+
     // Ultrasonic Related
     constexpr uint8_t OBSTACLE_DISTANCE = 20;     // Obstacle distance threshold (cm)
     constexpr uint16_t MAX_DISTANCE = 300;        // Max detection distance (cm)
+
+    // Servo smooth-ramp (non-blocking) - Fase 1
+    // Moves the camera servo gradually towards its goal so it never jerks
+    // and never blocks the main loop / the motors.
+    constexpr uint8_t  SERVO_MIN_DEG        = 0;   // Physical lower limit
+    constexpr uint8_t  SERVO_MAX_DEG        = 180; // Physical upper limit
+    constexpr uint8_t  SERVO_STEP_DEG       = 1;   // Degrees advanced per step
+    constexpr uint16_t SERVO_STEP_INTERVAL_MS = 25; // ~40 deg/s (1 deg / 25 ms)
 }
 
 /**
@@ -132,11 +140,32 @@ public:
     // ========== Servo Control ==========
     
     /**
-     * @brief Set Servo Angle
-     * @param angle Angle (0-180)
+     * @brief Set the servo GOAL angle (0-180).
+     *
+     * [Fase 1] Non-blocking: this only stores the target. The servo is moved
+     * gradually towards it by updateServo(), which must be called every loop.
+     * No delay(), no immediate write() -> never blocks the motors.
      */
     void setServoAngle(uint8_t angle);
-    
+
+    /**
+     * @brief Advance the servo one small step towards its goal.
+     *
+     * [Fase 1] Must be called continuously from the main loop. Does nothing
+     * when the servo is already at the goal (servo stays perfectly still).
+     */
+    void updateServo();
+
+    /**
+     * @brief True when the servo has physically reached its goal angle.
+     */
+    bool servoAtGoal() const { return m_servoCurrent == m_servoGoal; }
+
+    /**
+     * @brief Get the current (ramped) servo angle.
+     */
+    uint8_t getServoAngle() const { return m_servoCurrent; }
+
     /**
      * @brief Center Servo (90 degrees)
      */
@@ -159,9 +188,14 @@ public:
 private:
     // Sensor Data
     SensorData m_sensorData;
-    
+
     // Servo Object
     Servo m_servo;
+
+    // Servo smooth-ramp state (Fase 1)
+    uint8_t  m_servoCurrent   = 90;   // Angle currently written to the servo
+    uint8_t  m_servoGoal      = 90;   // Angle we want to reach
+    uint32_t m_servoLastStepMs = 0;   // Timestamp of the last ramp step
     
     // ========== Motor Control Internal Methods ==========
     

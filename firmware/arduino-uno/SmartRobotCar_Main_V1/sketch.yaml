@@ -1,0 +1,37 @@
+# Perfil de build reproduzível do GEAR Autonomous Rover (Arduino UNO).
+#
+# POR QUE ESTE ARQUIVO EXISTE
+# --------------------------
+# O FastLED >= ~3.7 passou a DEFINIR o vetor de interrupção Timer1
+# (ISR(TIMER1_COMPA_vect) == __vector_11) no seu subsistema fl::isr.
+# A biblioteca Servo (avr) TAMBÉM define __vector_11 (usa Timer1 no ATmega328P).
+# Linkar as duas => "multiple definition of __vector_11".
+#
+# O FastLED 3.5.0 (a versão distribuída pelo fabricante em
+# Add_Libraries/FastLED.zip) NÃO reivindica nenhum vetor de timer no AVR,
+# portanto convive com a Servo sem conflito.
+#
+# Este perfil fixa FastLED 3.5.0 + Servo 1.3.0 (as versões de
+# Add_Libraries/ do fabricante) num diretório de bibliotecas isolado gerido pelo
+# arduino-cli, então:
+#   - não importa qual FastLED/Servo esteja instalada globalmente;
+#   - a ambiguidade "Multiple libraries were found for Servo.h" desaparece;
+#   - o build é reproduzível em qualquer máquina.
+#
+# COMO COMPILAR
+#   arduino-cli compile --profile uno
+# COMO GRAVAR
+#   arduino-cli upload  --profile uno -p <porta>
+# Na Arduino IDE 2: selecionar o perfil "uno" no seletor de perfis do sketch.
+
+profiles:
+  uno:
+    notes: GEAR rover - Arduino UNO (ATmega328P). FastLED 3.5.0 fixo p/ evitar conflito de __vector_11 com Servo.
+    fqbn: arduino:avr:uno
+    platforms:
+      - platform: arduino:avr (1.8.8)
+    libraries:
+      - FastLED (3.5.0)
+      - Servo (1.3.0)
+
+default_profile: uno

@@ -1,366 +1,199 @@
-/**
- * @file RobotController.cpp
- * @brief Robot Core Controller Implementation
+/*
+ * RobotController.cpp
+ * Robot Core Controller Implementation
+ * 
  */
 
 #include "RobotController.h"
 #include "MotorDriverSystem.h"
 #include "FunctionModeManager.h"
 #include "CommunicationInterface.h"
-
 #include <avr/wdt.h>
 
-// Global Robot Controller Instance
+// [Fase 1 - R4] Safety watchdog for the serial-driven manual path.
+// If the computer (Python/App) stops sending commands while the rover is under
+// ManualControl, stop the motors and fall back to Standby. Autonomous firmware
+// modes (line / obstacle / target) are NOT affected - they are meant to run
+// without a computer connected.
+static const uint32_t MANUAL_COMMAND_TIMEOUT_MS = 600;
+
+// Global Robot Controller Instance Definition
 RobotController g_robot;
 
-
-// ============================================================
 // Constructor
-// ============================================================
-
-RobotController::RobotController()
-    : m_currentMode(OperationMode::Standby),
-      m_previousMode(OperationMode::Standby),
-      m_motorSystem(nullptr),
-      m_modeManager(nullptr),
-      m_commInterface(nullptr)
+RobotController::RobotController() 
+    : m_currentMode(OperationMode::Standby)
+    , m_previousMode(OperationMode::Standby)
+    , m_motorSystem(nullptr)
+    , m_modeManager(nullptr)
+    , m_commInterface(nullptr)
 {
     memset(m_commandId, 0, sizeof(m_commandId));
 }
 
-
-// ============================================================
 // Destructor
-// ============================================================
-
 RobotController::~RobotController() {
-
-    if (m_motorSystem) {
-        delete m_motorSystem;
-        m_motorSystem = nullptr;
-    }
-
-    if (m_modeManager) {
-        delete m_modeManager;
-        m_modeManager = nullptr;
-    }
-
-    if (m_commInterface) {
-        delete m_commInterface;
-        m_commInterface = nullptr;
-    }
+    // Cleanup subsystems
+    if (m_motorSystem) delete m_motorSystem;
+    if (m_modeManager) delete m_modeManager;
+    if (m_commInterface) delete m_commInterface;
 }
 
-
-// ============================================================
-// Initialize
-// ============================================================
-
+/**
+ * @brief Initialize robot system
+ */
 void RobotController::initialize() {
-
-    // --------------------------------------------------------
-    // Serial
-    // --------------------------------------------------------
-
+    // Initialize Serial
     Serial.begin(9600);
-
-    Serial.println(F("================================"));
-    Serial.println(F(" Robot Controller Initializing "));
-    Serial.println(F("================================"));
-
-
-    // --------------------------------------------------------
-    // Create subsystems
-    // --------------------------------------------------------
-
+    Serial.println(F("Robot Controller Initializing..."));
+    
+    // Create subsystem instances
     m_motorSystem = new MotorDriverSystem();
     m_modeManager = new FunctionModeManager();
     m_commInterface = new CommunicationInterface();
-
-
-    // --------------------------------------------------------
-    // Initialize Motor System
-    // --------------------------------------------------------
-
+    
+    // Initialize subsystems
     Serial.println(F("Initializing Motor System..."));
-
     m_motorSystem->initialize();
-
-
-    // --------------------------------------------------------
-    // Initialize Mode Manager
-    // --------------------------------------------------------
-
+    
     Serial.println(F("Initializing Mode Manager..."));
-
     m_modeManager->initialize(m_motorSystem);
-
-
-    // --------------------------------------------------------
-    // Initialize Communication
-    // --------------------------------------------------------
-
+    
     Serial.println(F("Initializing Communication..."));
-
     m_commInterface->initialize();
-
-
-    // --------------------------------------------------------
-    // Initial state
-    // --------------------------------------------------------
-
+    
+    // Set initial state
     m_currentMode = OperationMode::Standby;
     m_previousMode = OperationMode::Standby;
-
-    memset(m_commandId, 0, sizeof(m_commandId));
-
-
-    Serial.println(F("--------------------------------"));
+    
     Serial.println(F("Robot Controller Initialized!"));
-    Serial.println(F("Ultrasonic safety: ENABLED"));
-    Serial.println(F("Obstacle limit: 20 cm"));
     Serial.println(F("Ready to Start..."));
-    Serial.println(F("--------------------------------"));
 }
 
-
-// ============================================================
-// Main Update
-// ============================================================
-
+/**
+ * @brief Main Loop Update
+ */
 void RobotController::update() {
 
-    // ========================================================
-    // 1. UPDATE SENSORS
-    // ========================================================
-    //
-    // IMPORTANT:
-    //
-    // The ultrasonic sensor must be updated regardless
-    // of the current operation mode.
-    //
-    // This guarantees that manual control, line following,
-    // AI control, etc. can all use the safety system.
-    //
-    // updateSensors() internally controls the update rate.
-    // ========================================================
+    // [Fase 1] Advance the smooth servo ramp every loop (non-blocking).
+    // Must run in every mode so the camera keeps panning while the rover drives.
+    m_motorSystem->updateServo();
 
-    if (m_motorSystem != nullptr) {
+    if (m_currentMode == OperationMode::LineFollowing) {
+        // Line Following Mode: Skip all sensor updates (Line sensors read directly in executeLineFollowing)
+        // No ultrasonic needed, no voltage monitoring needed (LED updates at lower frequency)
+    } else if (m_currentMode == OperationMode::ObstacleAvoidance || 
+               m_currentMode == OperationMode::TargetFollowing) {
+        // Obstacle/Target Following Mode: Need ultrasonic, no line sensors
+        m_motorSystem->updateSensors();
+    } else {
+        // Other Modes: Update all sensors (Standby, Manual, etc.)
         m_motorSystem->updateSensors();
     }
+    
+    // 2. Process Inputs (Serial, IR, Buttons) - Must execute, otherwise cannot switch modes
+    m_commInterface->processSerialCommands(this);
+    m_commInterface->processIRRemote(this);
+    m_commInterface->processKeyPress(this);
+    
+    // 2.5. Check IR direction key timeout (Auto stop after 300ms)
+    m_commInterface->checkDirectionKeyTimeout(this);
 
-
-    // ========================================================
-    // 2. PROCESS INPUTS
-    // ========================================================
-
-    if (m_commInterface != nullptr) {
-
-        // Serial / WiFi commands
-        m_commInterface->processSerialCommands(this);
-
-        // IR remote
-        m_commInterface->processIRRemote(this);
-
-        // Keyboard / buttons
-        m_commInterface->processKeyPress(this);
-
-        // Automatic timeout for IR direction commands
-        m_commInterface->checkDirectionKeyTimeout(this);
-    }
-
-
-    // ========================================================
-    // 3. EXECUTE CURRENT MODE
-    // ========================================================
-
-    executeCurrentMode();
-
-
-    // ========================================================
-    // 4. UPDATE LED STATUS
-    // ========================================================
-
-    static uint32_t lastLEDUpdate = 0;
-
-    if (millis() - lastLEDUpdate > 100) {
-
-        lastLEDUpdate = millis();
-
-        if (m_motorSystem != nullptr &&
-            m_commInterface != nullptr) {
-
-            const SensorData& sensorData =
-                m_motorSystem->getSensorData();
-
-            m_commInterface->updateLEDStatus(
-                static_cast<uint8_t>(m_currentMode),
-                sensorData.power.isLowBattery
-            );
+    // 2.6. [Fase 1 - R4] Manual-control command watchdog.
+    // ManualControl is only ever entered from a serial command (N:102) or an IR
+    // direction key. If commands stop arriving, stop and return to Standby.
+    if (m_currentMode == OperationMode::ManualControl) {
+        uint32_t sinceCmd = millis() - m_commInterface->lastCommandMillis();
+        if (sinceCmd > MANUAL_COMMAND_TIMEOUT_MS) {
+            m_motorSystem->stop();
+            setMode(OperationMode::Standby);
+            Serial.println(F("[SAFETY] Manual command timeout -> Standby"));
         }
     }
+
+    // 3. Execute Current Mode
+    executeCurrentMode();
+    
+    // 4. Update LED Display (Low frequency update, reduce overhead)
+    static uint32_t lastLEDUpdate = 0;
+    if (millis() - lastLEDUpdate > 100) { // Update every 100ms (Further reduce frequency)
+        lastLEDUpdate = millis();
+        const SensorData& sensorData = m_motorSystem->getSensorData();
+        m_commInterface->updateLEDStatus(
+            static_cast<uint8_t>(m_currentMode),
+            sensorData.power.isLowBattery
+        );
+    }
 }
 
-
-// ============================================================
-// Set Operation Mode
-// ============================================================
-
+/**
+ * @brief Set Operation Mode
+ * 
+ * @param mode Target Mode
+ */
 void RobotController::setMode(OperationMode mode) {
-
-    if (m_currentMode == mode) {
-        return;
+    if (m_currentMode != mode) {
+        m_previousMode = m_currentMode;
+        m_currentMode = mode;
+        
+        // Debug Output
+        Serial.print(F("Mode changed: "));
+        Serial.print(static_cast<int>(m_previousMode));
+        Serial.print(F(" -> "));
+        Serial.println(static_cast<int>(m_currentMode));
     }
-
-
-    // Save previous mode
-    m_previousMode = m_currentMode;
-
-    // Change mode
-    m_currentMode = mode;
-
-
-    // --------------------------------------------------------
-    // Safety: stop robot when changing modes
-    // --------------------------------------------------------
-
-    if (m_motorSystem != nullptr) {
-
-        m_motorSystem->stop();
-    }
-
-
-    // --------------------------------------------------------
-    // Debug
-    // --------------------------------------------------------
-
-    Serial.print(F("Mode changed: "));
-
-    Serial.print(
-        static_cast<int>(m_previousMode)
-    );
-
-    Serial.print(F(" -> "));
-
-    Serial.println(
-        static_cast<int>(m_currentMode)
-    );
 }
 
-
-// ============================================================
-// Set Command ID
-// ============================================================
-
+/**
+ * @brief Set Command ID
+ * 
+ * @param id Command Identifier
+ */
 void RobotController::setCommandId(const char* id) {
-
-    if (id == nullptr) {
-        return;
+    if (id) {
+        strncpy(m_commandId, id, sizeof(m_commandId) - 1);
+        m_commandId[sizeof(m_commandId) - 1] = '\0';
     }
-
-    strncpy(
-        m_commandId,
-        id,
-        sizeof(m_commandId) - 1
-    );
-
-    m_commandId[sizeof(m_commandId) - 1] = '\0';
 }
 
-
-// ============================================================
-// Execute Current Mode
-// ============================================================
-
+/**
+ * @brief Execute Current Mode Logic
+ */
 void RobotController::executeCurrentMode() {
-
-    if (m_modeManager == nullptr) {
-        return;
-    }
-
-
     switch (m_currentMode) {
-
-
-        // ====================================================
-        // STANDBY
-        // ====================================================
-
         case OperationMode::Standby:
-
+            // Standby Mode
             m_modeManager->executeStandby();
-
             break;
-
-
-        // ====================================================
-        // LINE FOLLOWING
-        // ====================================================
-
+            
         case OperationMode::LineFollowing:
-
+            // Line Following Mode
             m_modeManager->executeLineFollowing();
-
             break;
-
-
-        // ====================================================
-        // OBSTACLE AVOIDANCE
-        // ====================================================
-
+            
         case OperationMode::ObstacleAvoidance:
-
+            // Obstacle Avoidance Mode
             m_modeManager->executeObstacleAvoidance();
-
             break;
-
-
-        // ====================================================
-        // TARGET FOLLOWING
-        // ====================================================
-
+            
         case OperationMode::TargetFollowing:
-
+            // Target Following Mode
             m_modeManager->executeTargetFollowing();
-
             break;
-
-
-        // ====================================================
-        // MANUAL CONTROL
-        // ====================================================
-
+            
         case OperationMode::ManualControl:
-
-            // Movement is controlled by external commands.
-            // Safety is handled inside FunctionModeManager.
-
+            // Manual Control Mode (Driven by external commands, no execution needed here)
             break;
-
-
-        // ====================================================
-        // PROGRAMMING
-        // ====================================================
-
+            
         case OperationMode::Programming:
-
-            // Waiting for external commands.
-
+            // Programming Mode (Waiting for commands, no execution needed here)
             break;
-
-
-        // ====================================================
-        // INVALID MODE
-        // ====================================================
-
+            
         default:
-
-            Serial.println(
-                F("ERROR: Invalid operation mode!")
-            );
-
+            // Unknown mode, switch to Standby
             setMode(OperationMode::Standby);
-
             break;
     }
 }
+
+
